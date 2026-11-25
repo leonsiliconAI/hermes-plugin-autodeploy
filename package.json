@@ -1,0 +1,19 @@
+{
+  "name": "@-/com.leonsilicon.hermes.plugins.autodeploy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hermes plugin: deploy each plugin mirror's new commit to Hermes, then restart the gateway when it is idle.",
+  "type": "module",
+  "imports": {
+    "#plugin": "./plugin.ts"
+  },
+  "exports": {
+    ".": "./+.ts"
+  },
+  "scripts": {
+    "build": "vp pack"
+  },
+  "devDependencies": {
+    "vite-plus": "1.5.0"
+  }
+}
