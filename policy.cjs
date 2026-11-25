@@ -77,6 +77,10 @@ function recordResult(state, deploy, error, now) {
 		attempts
 	};
 }
+/** True when the install changed nothing because another updater held the plugin's lock: try next round. */
+function transient(output) {
+	return /is already being updated by another Hermes process/.test(output);
+}
 /** True once the last `quiet` samples of the gateway's active-work count are all zero. */
 function idle(samples, quiet = 3) {
 	const recent = samples.slice(-quiet);
@@ -114,3 +118,4 @@ exports.mirrorUrl = mirrorUrl;
 exports.pending = pending;
 exports.recordResult = recordResult;
 exports.summary = summary;
+exports.transient = transient;

@@ -122,14 +122,30 @@ def gateway_runner() -> Any:
     return ref() if callable(ref) else None
 
 
+def live_cron_runs() -> int:
+    """Cron runs in flight, including ``no_agent`` scripts started from the dashboard's Run now.
+
+    The gateway's own work count (and so its graceful restart) only sees runs on its scheduler's
+    thread pool; a Run-now script runs under another owner, and a restart ends it mid-script."""
+    try:
+        from cron.jobs import list_jobs
+
+        return sum(1 for job in list_jobs(include_disabled=True) if job.get("live_execution"))
+    except Exception:
+        logger.warning("autodeploy: could not read cron runs; treating them as idle", exc_info=True)
+        return 0
+
+
 def active_work(runner: Any) -> int:
     """Turns, cron runs, API runs and background delegations the gateway is holding."""
     count = getattr(runner, "_active_work_count", None)
     if callable(count):
-        return int(count())
-    from gateway.status import read_runtime_status
+        work = int(count())
+    else:
+        from gateway.status import read_runtime_status
 
-    return int((read_runtime_status() or {}).get("active_agents") or 0)
+        work = int((read_runtime_status() or {}).get("active_agents") or 0)
+    return work + live_cron_runs()
 
 
 def restarting(runner: Any) -> bool:
@@ -316,6 +332,10 @@ class Deployer:
         results = []
         for deploy in todo:
             code, output = self.install(_policy("installArgs", deploy))
+            if code != 0 and _policy("transient", output):
+                logger.info("autodeploy: %s is being updated by another Hermes process; trying again next round",
+                            deploy["name"])
+                continue
             error = None
             if code != 0:
                 error = f"hermes plugins install exited {code}\n{output}"

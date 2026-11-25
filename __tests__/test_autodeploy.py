@@ -238,6 +238,38 @@ class DeployerTests(unittest.TestCase):
         self.assertEqual(len(self.restarts), 1)
         self.assertEqual(len(self.posts), 1)
 
+    def test_another_updater_holding_the_lock_is_retried_next_round_without_a_failure(self):
+        self.hermes.fail["hermes22muse"] = (
+            1, "Error: Plugin 'hermes22muse' is already being updated by another Hermes process; nothing was changed.")
+        self.assertEqual(self.deployer.tick(), [])
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.restarts, [])
+        self.assertFalse((self.dir / "state.json").exists())
+        del self.hermes.fail["hermes22muse"]
+        self.deployer.tick()
+        self.assertEqual(len(self.hermes.calls), 2)
+        self.assertEqual(len(self.restarts), 1)
+
+    def test_live_cron_runs_count_as_work(self):
+        jobs = [{"id": "a", "live_execution": {"pid": 1}}, {"id": "b", "live_execution": None}]
+        cron = type(sys)("cron")
+        cron_jobs = type(sys)("cron.jobs")
+        cron_jobs.list_jobs = lambda include_disabled=False: jobs if include_disabled else []
+        cron.jobs = cron_jobs
+        saved = {name: sys.modules.get(name) for name in ("cron", "cron.jobs")}
+        sys.modules.update({"cron": cron, "cron.jobs": cron_jobs})
+        try:
+            runner = SimpleNamespace(_active_work_count=lambda: 2)
+            self.assertEqual(plugin.active_work(runner), 3)
+            jobs[0]["live_execution"] = None
+            self.assertEqual(plugin.active_work(runner), 2)
+        finally:
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
 
 class NotifyTests(unittest.TestCase):
     def test_without_a_channel_nothing_is_posted(self):

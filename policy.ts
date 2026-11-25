@@ -110,6 +110,11 @@ export function recordResult(
   return { ...state, attempts };
 }
 
+/** True when the install changed nothing because another updater held the plugin's lock: try next round. */
+export function transient(output: string): boolean {
+  return /is already being updated by another Hermes process/.test(output);
+}
+
 /** True once the last `quiet` samples of the gateway's active-work count are all zero. */
 export function idle(samples: number[], quiet = 3): boolean {
   const recent = samples.slice(-quiet);
