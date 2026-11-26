@@ -157,6 +157,7 @@ class DeployerTests(unittest.TestCase):
             self.dir / "state.json", runner=lambda: self.runner if runner == "default" else runner,
             installs=self.hermes.installs, head=self.hermes.head, install=self.hermes.install,
             revision=self.hermes.revision, work=work, restart=restart, post=self.posts.append,
+            watchdog=lambda: self.dir / "pythonmonkey-deadman.log",
             sleep=self.slept.append, clock=lambda: self.now)
 
     def state(self):
@@ -165,6 +166,21 @@ class DeployerTests(unittest.TestCase):
     def test_outside_the_gateway_it_does_nothing(self):
         self.assertEqual(self._deployer(runner=None).tick(), [])
         self.assertEqual(self.hermes.calls, [])
+
+    def test_a_gateway_the_watchdog_ended_is_reported_once(self):
+        self.hermes.heads[MIRROR] = OLD
+        log = self.dir / "pythonmonkey-deadman.log"
+        log.write_text("")
+        self.deployer.tick()
+        self.assertEqual(self.posts, [])
+        log.write_text("Timeout (0:02:00)!\nThread 0x1 [hermes-pythonmonkey] (most recent call first):\n")
+        self._deployer().tick()
+        self.assertEqual(len(self.posts), 1)
+        self.assertIn("Hermes restarted itself at", self.posts[0])
+        self.assertIn(str(log), self.posts[0])
+        self._deployer().tick()
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.state()["watchdog"], log.stat().st_size)
 
     def test_moved_mirror_is_installed_pinned_then_the_gateway_restarts_once(self):
         results = self.deployer.tick()

@@ -109,6 +109,14 @@ function failureMessage(deploy, error, attempt) {
 		"```"
 	].join("\n");
 }
+/**
+* The Slack message for a gateway the PythonMonkey watchdog ended (see `_pythonmonkey.py`), or null
+* when its file holds nothing new. `size` and `seen` are the file's size now and when last reported.
+*/
+function watchdogMessage(size, seen, stoppedAt, path) {
+	if (size <= seen) return null;
+	return [`:rotating_light: Hermes restarted itself at ${stoppedAt}. Its JavaScript engine had stopped running, which happens when JavaScript in a plugin, or other native code, keeps Python's interpreter lock and so stops every part of Hermes. The PythonMonkey watchdog ended the process and the supervisor started a new one.`, `Every thread's stack from that moment is at the end of \`${path}\`. Messages sent while Hermes was stuck may need to be sent again.`].join("\n");
+}
 exports.failureMessage = failureMessage;
 exports.idle = idle;
 exports.installArgs = installArgs;
@@ -119,3 +127,4 @@ exports.pending = pending;
 exports.recordResult = recordResult;
 exports.summary = summary;
 exports.transient = transient;
+exports.watchdogMessage = watchdogMessage;

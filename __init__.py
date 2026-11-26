@@ -253,6 +253,11 @@ def save_state(path: Path, state: dict) -> None:
         raise
 
 
+def watchdog_log() -> Path:
+    # Where the plugins' PythonMonkey bridge leaves every thread's stack when it ends a stuck gateway.
+    return _hermes_home() / "logs" / "pythonmonkey-deadman.log"
+
+
 # --------------------------------------------------------------------------------------------
 # The deployer
 
@@ -278,15 +283,34 @@ class Deployer:
                  work: Callable[[Any], int] = active_work,
                  restart: Callable[[Any], None] = request_restart,
                  post: Callable[[str], None] = notify,
+                 watchdog: Callable[[], Path] = watchdog_log,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.time,
                  stop: Optional[threading.Event] = None) -> None:
         self.state_path = state_path
         self.runner, self.installs, self.head, self.install = runner, installs, head, install
         self.revision, self.work, self.restart, self.post = revision, work, restart, post
-        self.sleep, self.clock = sleep, clock
+        self.sleep, self.clock, self.watchdog = sleep, clock, watchdog
         self.stop = stop or threading.Event()
         self.announced = False
+
+    def _report_watchdog(self, state: dict) -> None:
+        """Say in Slack, once, that the PythonMonkey watchdog ended a gateway since the last look."""
+        path = self.watchdog()
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+        seen = state.get("watchdog") or 0
+        if stat.st_size == seen:
+            return
+        stopped = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(stat.st_mtime))
+        message = _policy("watchdogMessage", stat.st_size, seen, stopped, str(path))
+        state["watchdog"] = stat.st_size
+        save_state(self.state_path, state)
+        if message:
+            logger.error("autodeploy: the PythonMonkey watchdog ended the gateway at %s; see %s", stopped, path)
+            self.post(message)
 
     def _pending(self, installs: list[dict], state: dict) -> list[dict]:
         managed = _policy("managed", installs)
@@ -317,6 +341,7 @@ class Deployer:
             names = [install["name"] for install in _policy("managed", installs)]
             logger.info("autodeploy: keeping %s at their mirror's main (checked every %ss)",
                         ", ".join(names) or "no plugins", int(_interval()))
+            self._report_watchdog(state)
             self.announced = True
         todo = self._pending(installs, state)
         if not todo:
