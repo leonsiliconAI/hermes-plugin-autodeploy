@@ -110,12 +110,19 @@ function failureMessage(deploy, error, attempt) {
 	].join("\n");
 }
 /**
-* The Slack message for a gateway the PythonMonkey watchdog ended (see `_pythonmonkey.py`), or null
-* when its file holds nothing new. `size` and `seen` are the file's size now and when last reported.
+* The Slack message for what the plugins' bridge wrote since the last look: each line is a policy
+* worker it had to end, or one that died (see `_bridge.py`). Null when there is nothing new.
 */
-function watchdogMessage(size, seen, stoppedAt, path) {
-	if (size <= seen) return null;
-	return [`:rotating_light: Hermes restarted itself at ${stoppedAt}. Its JavaScript engine had stopped running, which happens when JavaScript in a plugin, or other native code, keeps Python's interpreter lock and so stops every part of Hermes. The PythonMonkey watchdog ended the process and the supervisor started a new one.`, `Every thread's stack from that moment is at the end of \`${path}\`. Messages sent while Hermes was stuck may need to be sent again.`].join("\n");
+function workerMessage(lines, path) {
+	const ended = lines.map((line) => line.trim()).filter(Boolean);
+	if (!ended.length) return null;
+	return [
+		":rotating_light: The process that runs Hermes's plugin policies had to be replaced. Hermes kept running; the calls that were in it failed.",
+		"```",
+		...ended.slice(-5),
+		"```",
+		`The full record is \`${path}\`.`
+	].join("\n");
 }
 exports.failureMessage = failureMessage;
 exports.idle = idle;
@@ -127,4 +134,4 @@ exports.pending = pending;
 exports.recordResult = recordResult;
 exports.summary = summary;
 exports.transient = transient;
-exports.watchdogMessage = watchdogMessage;
+exports.workerMessage = workerMessage;

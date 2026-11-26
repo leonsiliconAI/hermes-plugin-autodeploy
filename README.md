@@ -19,7 +19,7 @@ Inside the gateway, every `AUTODEPLOY_INTERVAL` seconds (default 60, minimum 30)
 
 An install that finds another updater holding the plugin's lock (`hermes plugins update`, the dashboard, a script) changes nothing, and autodeploy tries again on the next round. A failed install keeps the old code. The failure is logged, posted to `AUTODEPLOY_SLACK_CHANNEL` if that is set, and retried after 5 and then 30 minutes. After three failures, that commit is left alone until the mirror moves again. The attempts are kept in `$HERMES_HOME/plugin-data/autodeploy/state.json`.
 
-**A gateway the watchdog ended.** The plugins' [PythonMonkey bridge](../../DEVELOPMENT.md#hermes-plugin-mirrors) ends a gateway whose JavaScript has stopped responding and leaves every thread's stack in `$HERMES_HOME/logs/pythonmonkey-deadman.log`. When the next gateway starts, autodeploy posts that once to `AUTODEPLOY_SLACK_CHANNEL`, with the time and the file, so a restart nobody asked for doesn't pass unnoticed.
+**A policy worker that had to be replaced.** The plugins' [bridge](../../DEVELOPMENT.md#hermes-plugin-mirrors) runs their policies in a Node process and ends one whose JavaScript has stopped answering. It writes a line for each in `$HERMES_HOME/logs/policy-worker.log`, with what the worker was running. Autodeploy posts the new lines to `AUTODEPLOY_SLACK_CHANNEL` on its next check, so a policy that stalls doesn't pass unnoticed.
 
 **The install window.** `hermes plugins install` also tells the running gateway to reload the plugin over its control socket. Nothing turns that off, and the socket's path follows `HERMES_HOME`. So from the first install until the restart, the gateway runs the new plugin code reloaded in place. A turn that starts in that window, about half a minute per plugin, can meet a half-reloaded plugin. On 2026-11-25 hermes22muse lost its Muse relay that way, because its Slack handler, which sets the relay, isn't run again on a reload. Autodeploy keeps the window short: it starts only when the gateway is idle and requests the restart as soon as the last install ends. A plugin should still survive a reload. Hermes reloads on `hermes plugins enable` and on dashboard updates too. Closing the window completely would mean stopping the gateway for the installs (what `hermes import` does with `gateway_paused`). That relies on Hermes internals, and if it failed midway it could leave Hermes down, so autodeploy doesn't.
 
@@ -32,7 +32,7 @@ Hermes refuses cron jobs that restart the gateway, to prevent restart loops (`cr
 | `.env` key                 | Meaning                                                                                                                                    |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `AUTODEPLOY_INTERVAL`      | Seconds between mirror checks. Default 60, minimum 30.                                                                                     |
-| `AUTODEPLOY_SLACK_CHANNEL` | Slack channel or user ID that hears about failed deploys and about a gateway the PythonMonkey watchdog ended. Unset, both are only logged. |
+| `AUTODEPLOY_SLACK_CHANNEL` | Slack channel or user ID that hears about failed deploys and about a policy worker the bridge had to replace. Unset, both are only logged. |
 
 ## Install
 
@@ -48,5 +48,5 @@ The gateway log then shows `autodeploy: keeping <plugins> at their mirror's main
 
 ```sh
 vp -C apps/hermes-plugin-autodeploy pack
-uv run --no-project --python 3.14 --with pythonmonkey==1.5.1 --with pytest python -m pytest --rootdir=. --import-mode=importlib apps/hermes-plugin-autodeploy/__tests__
+uv run --no-project --python 3.14 --with pygls==2.1.1 --with pytest python -m pytest --rootdir=. --import-mode=importlib apps/hermes-plugin-autodeploy/__tests__
 ```

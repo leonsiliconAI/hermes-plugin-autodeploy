@@ -157,7 +157,7 @@ class DeployerTests(unittest.TestCase):
             self.dir / "state.json", runner=lambda: self.runner if runner == "default" else runner,
             installs=self.hermes.installs, head=self.hermes.head, install=self.hermes.install,
             revision=self.hermes.revision, work=work, restart=restart, post=self.posts.append,
-            watchdog=lambda: self.dir / "pythonmonkey-deadman.log",
+            worker_log=lambda: self.dir / "policy-worker.log",
             sleep=self.slept.append, clock=lambda: self.now)
 
     def state(self):
@@ -167,20 +167,27 @@ class DeployerTests(unittest.TestCase):
         self.assertEqual(self._deployer(runner=None).tick(), [])
         self.assertEqual(self.hermes.calls, [])
 
-    def test_a_gateway_the_watchdog_ended_is_reported_once(self):
+    def test_a_policy_worker_that_had_to_be_ended_is_reported_once(self):
         self.hermes.heads[MIRROR] = OLD
-        log = self.dir / "pythonmonkey-deadman.log"
-        log.write_text("")
+        log = self.dir / "policy-worker.log"
         self.deployer.tick()
         self.assertEqual(self.posts, [])
-        log.write_text("Timeout (0:02:00)!\nThread 0x1 [hermes-pythonmonkey] (most recent call first):\n")
-        self._deployer().tick()
+        first = "2026-11-26 17:00:00 UTC The policy worker was ended: its JavaScript did not answer for 15 seconds. It was running slackChunks in hermes22muse.\n"
+        log.write_text(first)
+        self.deployer.tick()
         self.assertEqual(len(self.posts), 1)
-        self.assertIn("Hermes restarted itself at", self.posts[0])
+        self.assertIn("slackChunks in hermes22muse", self.posts[0])
         self.assertIn(str(log), self.posts[0])
+        self.deployer.tick()
         self._deployer().tick()
         self.assertEqual(len(self.posts), 1)
-        self.assertEqual(self.state()["watchdog"], log.stat().st_size)
+        # Only what is new is posted the next time.
+        log.write_text(first + "2026-11-26 18:00:00 UTC The policy worker exited with status -9.\n")
+        self.deployer.tick()
+        self.assertEqual(len(self.posts), 2)
+        self.assertIn("status -9", self.posts[1])
+        self.assertNotIn("slackChunks", self.posts[1])
+        self.assertEqual(self.state()["worker_log"], log.stat().st_size)
 
     def test_moved_mirror_is_installed_pinned_then_the_gateway_restarts_once(self):
         results = self.deployer.tick()

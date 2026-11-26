@@ -36,7 +36,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ._pythonmonkey import call
+from ._bridge import call
 
 logger = logging.getLogger(__name__)
 
@@ -253,9 +253,9 @@ def save_state(path: Path, state: dict) -> None:
         raise
 
 
-def watchdog_log() -> Path:
-    # Where the plugins' PythonMonkey bridge leaves every thread's stack when it ends a stuck gateway.
-    return _hermes_home() / "logs" / "pythonmonkey-deadman.log"
+def worker_log() -> Path:
+    # Where the plugins' bridge writes a line for each policy worker it had to end.
+    return _hermes_home() / "logs" / "policy-worker.log"
 
 
 # --------------------------------------------------------------------------------------------
@@ -283,33 +283,36 @@ class Deployer:
                  work: Callable[[Any], int] = active_work,
                  restart: Callable[[Any], None] = request_restart,
                  post: Callable[[str], None] = notify,
-                 watchdog: Callable[[], Path] = watchdog_log,
+                 worker_log: Callable[[], Path] = worker_log,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.time,
                  stop: Optional[threading.Event] = None) -> None:
         self.state_path = state_path
         self.runner, self.installs, self.head, self.install = runner, installs, head, install
         self.revision, self.work, self.restart, self.post = revision, work, restart, post
-        self.sleep, self.clock, self.watchdog = sleep, clock, watchdog
+        self.sleep, self.clock, self.worker_log = sleep, clock, worker_log
         self.stop = stop or threading.Event()
         self.announced = False
 
-    def _report_watchdog(self, state: dict) -> None:
-        """Say in Slack, once, that the PythonMonkey watchdog ended a gateway since the last look."""
-        path = self.watchdog()
+    def _report_worker(self, state: dict) -> None:
+        """Say in Slack what the plugins' bridge recorded since the last look: a policy worker ended."""
+        path = self.worker_log()
         try:
-            stat = path.stat()
+            size = path.stat().st_size
         except OSError:
             return
-        seen = state.get("watchdog") or 0
-        if stat.st_size == seen:
+        seen = state.get("worker_log") or 0
+        if size == seen:
             return
-        stopped = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(stat.st_mtime))
-        message = _policy("watchdogMessage", stat.st_size, seen, stopped, str(path))
-        state["watchdog"] = stat.st_size
+        new = ""
+        if size > seen:
+            with path.open("rb") as log:
+                log.seek(seen)
+                new = log.read().decode("utf-8", "replace")
+        message = _policy("workerMessage", new.splitlines(), str(path))
+        state["worker_log"] = size
         save_state(self.state_path, state)
         if message:
-            logger.error("autodeploy: the PythonMonkey watchdog ended the gateway at %s; see %s", stopped, path)
             self.post(message)
 
     def _pending(self, installs: list[dict], state: dict) -> list[dict]:
@@ -341,8 +344,8 @@ class Deployer:
             names = [install["name"] for install in _policy("managed", installs)]
             logger.info("autodeploy: keeping %s at their mirror's main (checked every %ss)",
                         ", ".join(names) or "no plugins", int(_interval()))
-            self._report_watchdog(state)
             self.announced = True
+        self._report_worker(state)
         todo = self._pending(installs, state)
         if not todo:
             return []

@@ -1,6 +1,6 @@
 {
   "name": "@-/com.leonsilicon.hermes.plugins.autodeploy",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Hermes plugin: deploy each plugin mirror's new commit to Hermes, then restart the gateway when it is idle.",
   "type": "module",
