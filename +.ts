@@ -1,1 +1,8 @@
-export { intervalEnv, pluginDirectory, pluginFiles, pluginName, slackChannelEnv } from "#plugin";
+export {
+  deployPath,
+  pluginDirectory,
+  pluginFiles,
+  pluginName,
+  slackChannelEnv,
+  tokenEnv,
+} from "#plugin";

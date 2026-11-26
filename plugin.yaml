@@ -1,7 +1,7 @@
 name: autodeploy
 label: Autodeploy
-version: 1.2.0
+version: 2.0.0
 description: >
-  Keeps every plugin installed from a leonsiliconAI mirror at the commit CI last published to it:
-  installs the new commit when Hermes is idle, then restarts the gateway gracefully.
+  Deploys a push to main when CI asks: installs each plugin at the commit CI published to its
+  leonsiliconAI mirror, then restarts the gateway once Hermes is idle.
 author: leonsilicon

@@ -6,7 +6,7 @@ export interface Install {
   enabled?: boolean;
 }
 
-/** One plugin to move from its installed commit to its mirror's newest commit on `main`. */
+/** One plugin to move from its installed commit to the commit CI asked for. */
 export interface Deploy {
   name: string;
   source: string;
@@ -15,25 +15,15 @@ export interface Deploy {
   enabled: boolean;
 }
 
-/** Failed attempts at the commit a plugin is being moved to. A new commit starts over. */
-export interface Attempt {
-  target: string;
-  count: number;
-  at: number;
-  error?: string;
-}
-
-export interface State {
-  attempts?: Record<string, Attempt>;
+/** What CI sends: each plugin's Hermes name, the mirror it is installed from, and the commit. */
+export interface DeployRequest {
+  plugins?: { name?: unknown; mirror?: unknown; commit?: unknown }[];
 }
 
 /** The organization CI publishes the plugin mirrors to (packages/ai/leonsilicon/configs/hermes-mirrors). */
 const MIRROR = /^https:\/\/github\.com\/leonsiliconAI\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/;
 const COMMIT = /^[0-9a-f]{40}$/;
-
-/** Tries per commit, and how long to wait after each failure before the next one (milliseconds). */
-export const maxAttempts = 3;
-const retryDelays = [0, 5 * 60_000, 30 * 60_000];
+const SELF = "autodeploy";
 
 /** The mirror's clone URL when `source` is one of the leonsiliconAI plugin mirrors. */
 export function mirrorUrl(source: unknown): string | undefined {
@@ -42,40 +32,60 @@ export function mirrorUrl(source: unknown): string | undefined {
   return match ? `https://github.com/leonsiliconAI/${match[1]}.git` : undefined;
 }
 
-/** Installs autodeploy keeps current: those installed from a mirror. Manual copies have no source. */
+/** Installs a deploy may move: those installed from a mirror. Manual copies have no source. */
 export function managed(installs: Install[]): Install[] {
   return installs.filter((install) => mirrorUrl(install.source) !== undefined);
 }
 
 /**
- * The plugins whose mirror moved past what's installed. `heads` maps a plugin name to its mirror's
- * `main` commit (missing when the lookup failed). A commit that already failed waits out its retry
- * delay, and after `maxAttempts` failures it is left alone until the mirror moves again.
+ * The installs one request asks for. A plugin is only moved when it is already installed from that
+ * same mirror, to a full commit, so the token can't install anything new or from anywhere else.
+ * Plugins already at their commit are `current`. Autodeploy moves itself last.
  */
-export function pending(
-  installs: Install[],
-  heads: Record<string, string | undefined>,
-  state: State,
-  now: number,
-): Deploy[] {
+export function plan(request: DeployRequest, installs: Install[]) {
+  const errors: string[] = [];
   const deploys: Deploy[] = [];
-  for (const install of managed(installs)) {
-    const head = heads[install.name];
-    if (!head || !COMMIT.test(head) || head === install.revision) continue;
-    const attempt = state.attempts?.[install.name];
-    if (attempt?.target === head) {
-      if (attempt.count >= maxAttempts) continue;
-      if (now - attempt.at < (retryDelays[attempt.count] ?? retryDelays.at(-1)!)) continue;
+  const current: string[] = [];
+  const wanted = Array.isArray(request?.plugins) ? request.plugins : [];
+  if (!wanted.length) errors.push("the request names no plugins");
+  const byName = new Map(managed(installs).map((install) => [install.name, install]));
+  const seen = new Set<string>();
+  for (const item of wanted) {
+    const name = typeof item?.name === "string" ? item.name : "";
+    const commit = typeof item?.commit === "string" ? item.commit : "";
+    const install = byName.get(name);
+    if (!install) {
+      errors.push(`${name || "(no name)"} isn't installed from a leonsiliconAI mirror`);
+      continue;
+    }
+    if (seen.has(name)) {
+      errors.push(`${name} is named twice`);
+      continue;
+    }
+    seen.add(name);
+    const source = mirrorUrl(install.source)!;
+    if (mirrorUrl(item.mirror) !== source) {
+      errors.push(`${name} is installed from ${source}, not ${String(item.mirror)}`);
+      continue;
+    }
+    if (!COMMIT.test(commit)) {
+      errors.push(`${name}: ${JSON.stringify(commit)} isn't a full commit`);
+      continue;
+    }
+    if (install.revision === commit) {
+      current.push(name);
+      continue;
     }
     deploys.push({
-      name: install.name,
-      source: mirrorUrl(install.source)!,
+      name,
+      source,
       from: install.revision ?? "",
-      to: head,
+      to: commit,
       enabled: install.enabled !== false,
     });
   }
-  return deploys;
+  deploys.sort((a, b) => Number(a.name === SELF) - Number(b.name === SELF));
+  return { deploys, current, errors };
 }
 
 /** The arguments to `hermes` that move one plugin: pinned to the exact commit, enabled state kept. */
@@ -92,38 +102,9 @@ export function installArgs(deploy: Deploy): string[] {
   ];
 }
 
-/** The state after one install. A success clears the plugin's attempts; a failure counts one. */
-export function recordResult(
-  state: State,
-  deploy: Deploy,
-  error: string | null | undefined,
-  now: number,
-): State {
-  const attempts = { ...state.attempts };
-  if (!error) {
-    delete attempts[deploy.name];
-  } else {
-    const previous = attempts[deploy.name];
-    const count = previous?.target === deploy.to ? previous.count + 1 : 1;
-    attempts[deploy.name] = { target: deploy.to, count, at: now, error: error.slice(0, 2000) };
-  }
-  return { ...state, attempts };
-}
-
-/** True when the install changed nothing because another updater held the plugin's lock: try next round. */
-export function transient(output: string): boolean {
-  return /is already being updated by another Hermes process/.test(output);
-}
-
-/** True once the last `quiet` samples of the gateway's active-work count are all zero. */
-export function idle(samples: number[], quiet = 3): boolean {
-  const recent = samples.slice(-quiet);
-  return recent.length === quiet && recent.every((count) => count === 0);
-}
-
 const short = (commit: string) => commit.slice(0, 7) || "none";
 
-/** The gateway log line for a finished round, and whether it ends in a restart. */
+/** The log line for the installs, and whether they end in a restart. */
 export function summary(results: { deploy: Deploy; error?: string | null }[]) {
   const moved = results.filter((result) => !result.error);
   const failed = results.filter((result) => result.error);
@@ -133,26 +114,12 @@ export function summary(results: { deploy: Deploy; error?: string | null }[]) {
   ];
   return {
     restart: moved.length > 0,
+    // A new autodeploy only answers CI once the dashboard runs it.
+    restartDashboard: moved.some(({ deploy }) => deploy.name === SELF),
     log:
-      `autodeploy: ${parts.join(", ")}` +
+      `autodeploy: ${parts.join(", ") || "nothing to install"}` +
       (moved.length ? "; restarting the gateway once it is idle" : ""),
   };
-}
-
-/** The Slack message for a failed install. */
-export function failureMessage(deploy: Deploy, error: string, attempt: number): string {
-  const next =
-    attempt >= maxAttempts
-      ? "I won't try this commit again; the next mirror commit starts over."
-      : `I'll try again in ${Math.round((retryDelays[attempt] ?? 0) / 60_000)} minutes (attempt ${attempt} of ${maxAttempts}).`;
-  const detail = error.trim().split("\n").slice(-12).join("\n").slice(-1500);
-  return [
-    `:warning: autodeploy couldn't move *${deploy.name}* to \`${short(deploy.to)}\` (${deploy.source.replace(/\.git$/, "")}/commit/${deploy.to}). It stays on \`${short(deploy.from)}\`.`,
-    next,
-    "```",
-    detail || "(no output)",
-    "```",
-  ].join("\n");
 }
 
 /**

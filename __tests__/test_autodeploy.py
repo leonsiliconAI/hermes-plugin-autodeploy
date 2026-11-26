@@ -1,303 +1,293 @@
-"""Plain pytest; Git, the hermes CLI, the gateway runner and the restart are fakes."""
+"""Plain pytest; the hermes CLI, the gateway's PID and its restart are fakes."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import secrets
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location("autodeploy", Path(__file__).resolve().parents[1] / "__init__.py")
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("autodeploy", ROOT / "__init__.py")
 plugin = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
 
-OLD, NEW, NEWER = "a" * 40, "b" * 40, "c" * 40
-MIRROR = "https://github.com/leonsiliconAI/hermes-plugin-hermes22muse.git"
-MINUTE = 60_000
+OLD, NEW = "a" * 40, "b" * 40
+LEON = "https://github.com/leonsiliconAI/hermes-plugin-leon.git"
+SELF = "https://github.com/leonsiliconAI/hermes-plugin-autodeploy.git"
 
 
 def policy(function, *args):
     return plugin._policy(function, *args)
 
 
-def install(name="hermes22muse", source=MIRROR, revision=OLD, enabled=True):
+def install(name="leon", source=LEON, revision=OLD, enabled=True):
     return {"name": name, "source": source, "revision": revision, "enabled": enabled}
+
+
+def want(name="leon", mirror="https://github.com/leonsiliconAI/hermes-plugin-leon", commit=NEW):
+    return {"name": name, "mirror": mirror, "commit": commit}
 
 
 class PolicyTests(unittest.TestCase):
     def test_mirror_url_accepts_only_leonsiliconai_github_repos(self):
-        self.assertEqual(policy("mirrorUrl", MIRROR), MIRROR)
-        self.assertEqual(policy("mirrorUrl", "https://github.com/leonsiliconAI/slack22orca"),
-                         "https://github.com/leonsiliconAI/slack22orca.git")
+        self.assertEqual(policy("mirrorUrl", LEON), LEON)
+        self.assertEqual(policy("mirrorUrl", "https://github.com/leonsiliconAI/hermes-plugin-leon"), LEON)
         for source in ("https://github.com/someone/hermes-plugin-x.git", "leonsiliconAI/hermes-plugin-x",
                        "https://github.com/leonsiliconAI/x/tree/main", None, ""):
             self.assertIsNone(policy("mirrorUrl", source), source)
 
-    def test_pending_lists_only_mirror_installs_behind_their_head(self):
-        installs = [install(), install("current", revision=NEW),
-                    install("manual", source=None), install("other", source="https://example.com/x.git"),
-                    install("unreachable"), install("off", enabled=False)]
-        heads = {"hermes22muse": NEW, "current": NEW, "unreachable": None, "off": NEW, "manual": NEW,
-                 "other": NEW}
-        deploys = policy("pending", installs, heads, {}, 0)
-        self.assertEqual([(d["name"], d["to"], d["enabled"]) for d in deploys],
-                         [("hermes22muse", NEW, True), ("off", NEW, False)])
-        self.assertEqual(deploys[0]["from"], OLD)
+    def test_plan_moves_installed_mirror_plugins_and_autodeploy_last(self):
+        installs = [install("autodeploy", SELF), install(), install("current", revision=NEW),
+                    install("off", "https://github.com/leonsiliconAI/hermes-plugin-off.git", enabled=False)]
+        result = policy("plan", {"plugins": [
+            want("autodeploy", SELF), want(), want("current"), want("off", "https://github.com/leonsiliconAI/hermes-plugin-off")]},
+            installs)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([(d["name"], d["from"], d["to"], d["enabled"]) for d in result["deploys"]],
+                         [("leon", OLD, NEW, True), ("off", OLD, NEW, False), ("autodeploy", OLD, NEW, True)])
+        self.assertEqual(result["current"], ["current"])
 
-    def test_pending_ignores_a_head_that_is_not_a_commit(self):
-        self.assertEqual(policy("pending", [install()], {"hermes22muse": "refs/heads/main"}, {}, 0), [])
-
-    def test_failed_commit_waits_out_its_retry_delay_then_gives_up(self):
-        deploy = policy("pending", [install()], {"hermes22muse": NEW}, {}, 0)[0]
-        state = policy("recordResult", {}, deploy, "boom", 0)
-        self.assertEqual(state["attempts"]["hermes22muse"]["count"], 1)
-        self.assertEqual(policy("pending", [install()], {"hermes22muse": NEW}, state, 4 * MINUTE), [])
-        self.assertEqual(len(policy("pending", [install()], {"hermes22muse": NEW}, state, 5 * MINUTE)), 1)
-        state = policy("recordResult", state, deploy, "boom", 5 * MINUTE)
-        self.assertEqual(policy("pending", [install()], {"hermes22muse": NEW}, state, 34 * MINUTE), [])
-        state = policy("recordResult", state, deploy, "boom", 35 * MINUTE)
-        self.assertEqual(state["attempts"]["hermes22muse"]["count"], 3)
-        self.assertEqual(policy("pending", [install()], {"hermes22muse": NEW}, state, 10_000 * MINUTE), [])
-        # A newer mirror commit starts over.
-        self.assertEqual(len(policy("pending", [install()], {"hermes22muse": NEWER}, state, 35 * MINUTE)), 1)
-
-    def test_success_clears_attempts(self):
-        deploy = policy("pending", [install()], {"hermes22muse": NEW}, {}, 0)[0]
-        state = policy("recordResult", {"attempts": {"other": {"target": NEW, "count": 1, "at": 0}}}, deploy,
-                       "boom", 0)
-        state = policy("recordResult", state, deploy, None, 1)
-        self.assertEqual(list(state["attempts"]), ["other"])
+    def test_plan_refuses_anything_new_or_from_elsewhere(self):
+        installs = [install(), install("manual", source=None)]
+        cases = {
+            "x": [want("unknown")],
+            "manual": [want("manual")],
+            "other mirror": [want(mirror="https://github.com/leonsiliconAI/hermes-plugin-other")],
+            "branch": [want(commit="main")],
+            "short": [want(commit="b" * 12)],
+            "twice": [want(), want()],
+            "none": [],
+        }
+        for label, plugins in cases.items():
+            result = policy("plan", {"plugins": plugins}, installs)
+            self.assertTrue(result["errors"], label)
+        self.assertTrue(policy("plan", {}, installs)["errors"])
+        self.assertTrue(policy("plan", {"plugins": "leon"}, installs)["errors"])
 
     def test_install_args_pin_the_commit_and_keep_the_enabled_state(self):
-        deploy = policy("pending", [install()], {"hermes22muse": NEW}, {}, 0)[0]
+        deploy = policy("plan", {"plugins": [want()]}, [install()])["deploys"][0]
         self.assertEqual(policy("installArgs", deploy),
-                         ["plugins", "install", MIRROR, "--force", "--ref", NEW, "--yes-deps", "--enable"])
+                         ["plugins", "install", LEON, "--force", "--ref", NEW, "--yes-deps", "--enable"])
         self.assertEqual(policy("installArgs", {**deploy, "enabled": False})[-1], "--no-enable")
 
-    def test_idle_needs_three_quiet_samples(self):
-        self.assertFalse(policy("idle", [0, 0]))
-        self.assertFalse(policy("idle", [0, 1, 0]))
-        self.assertTrue(policy("idle", [2, 0, 0, 0]))
-
     def test_summary_restarts_only_when_something_moved(self):
-        deploy = policy("pending", [install()], {"hermes22muse": NEW}, {}, 0)[0]
-        self.assertEqual(policy("summary", [{"deploy": deploy, "error": None}]),
-                         {"restart": True, "log": "autodeploy: hermes22muse aaaaaaa..bbbbbbb; restarting the "
-                                                  "gateway once it is idle"})
+        deploy = policy("plan", {"plugins": [want()]}, [install()])["deploys"][0]
+        moved = policy("summary", [{"deploy": deploy, "error": None}])
+        self.assertEqual(moved, {"restart": True, "restartDashboard": False,
+                                 "log": "autodeploy: leon aaaaaaa..bbbbbbb; restarting the gateway once it is idle"})
         self.assertFalse(policy("summary", [{"deploy": deploy, "error": "boom"}])["restart"])
-
-    def test_failure_message_names_the_commit_and_the_next_try(self):
-        deploy = policy("pending", [install()], {"hermes22muse": NEW}, {}, 0)[0]
-        text = policy("failureMessage", deploy, "line\nlast line", 1)
-        self.assertIn("*hermes22muse*", text)
-        self.assertIn(f"https://github.com/leonsiliconAI/hermes-plugin-hermes22muse/commit/{NEW}", text)
-        self.assertIn("in 5 minutes (attempt 1 of 3)", text)
-        self.assertIn("last line", text)
-        self.assertIn("won't try this commit again", policy("failureMessage", deploy, "x", 3))
+        self.assertTrue(policy("summary", [{"deploy": {**deploy, "name": "autodeploy"}, "error": None}])["restartDashboard"])
 
 
 class FakeHermes:
-    """Install records, mirror heads and the hermes CLI, as the deployer sees them."""
-
-    def __init__(self, records, heads):
-        self.records = records
-        self.heads = heads
-        self.calls: list[list[str]] = []
-        self.fail: dict[str, tuple[int, str]] = {}
-        self.record_anyway = True
-
-    def installs(self):
-        return [{"name": n, **r, "enabled": r.get("enabled", True)} for n, r in self.records.items()]
-
-    def head(self, url):
-        return self.heads.get(url)
+    def __init__(self):
+        self.records = {"leon": OLD, "autodeploy": OLD}
+        self.calls = []
+        self.fail = {}
+        self.pids = [100]
+        self.restarted = []
+        self.dashboard = []
+        self.slept = 0.0
 
     def install(self, args):
         self.calls.append(args)
-        source, ref = args[2], args[args.index("--ref") + 1]
-        name = next(n for n, r in self.records.items() if policy("mirrorUrl", r["source"]) == source)
+        name = "autodeploy" if args[2] == SELF else "leon"
         if name in self.fail:
-            return self.fail[name]
-        if self.record_anyway:
-            self.records[name]["revision"] = ref
+            return self.fail[name], "boom"
+        self.records[name] = args[args.index("--ref") + 1]
         return 0, "Installed"
 
-    def revision(self, name):
-        return self.records[name]["revision"]
+    def pid(self):
+        return self.pids[0] if len(self.pids) == 1 else self.pids.pop(0)
+
+    def run(self, record, deploys, **kwargs):
+        clock = lambda: self.slept  # noqa: E731
+        return plugin.run_deploy(record, deploys, install=self.install, revision=self.records.get,
+                                 pid=self.pid, restart=self.restarted.append,
+                                 restart_dashboard=lambda: self.dashboard.append(True),
+                                 sleep=lambda seconds: setattr(self, "slept", self.slept + seconds),
+                                 clock=clock, **kwargs)
 
 
-class DeployerTests(unittest.TestCase):
+class DeployTests(unittest.TestCase):
     def setUp(self):
         self.dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.hermes = FakeHermes(
-            {"hermes22muse": {"source": MIRROR, "revision": OLD},
-             "slack22orca": {"source": "https://github.com/leonsiliconAI/slack22orca.git", "revision": OLD}},
-            {MIRROR: NEW, "https://github.com/leonsiliconAI/slack22orca.git": OLD})
-        self.runner = SimpleNamespace(_restart_requested=False, _draining=False)
-        self.work = [0]
-        self.restarts = []
-        self.posts = []
-        self.slept = []
-        self.now = 1_000.0
-        self.deployer = self._deployer()
+        self.deploys = plugin.Deploys(self.dir)
+        self.hermes = FakeHermes()
 
-    def _deployer(self, runner="default"):
-        def work(_runner):
-            return self.work.pop(0) if len(self.work) > 1 else self.work[0]
+    def record(self, *names):
+        installs = [install(), install("autodeploy", SELF)]
+        plan = policy("plan", {"plugins": [want(n, SELF if n == "autodeploy" else LEON.removesuffix(".git"))
+                                           for n in names]}, installs)
+        return self.deploys.create({"source": "c" * 40, "run": "https://github.com/x/actions/runs/1"}, plan)
 
-        def restart(runner):
-            self.restarts.append(runner)
-            runner._restart_requested = True
-
-        return plugin.Deployer(
-            self.dir / "state.json", runner=lambda: self.runner if runner == "default" else runner,
-            installs=self.hermes.installs, head=self.hermes.head, install=self.hermes.install,
-            revision=self.hermes.revision, work=work, restart=restart, post=self.posts.append,
-            worker_log=lambda: self.dir / "policy-worker.log",
-            sleep=self.slept.append, clock=lambda: self.now)
-
-    def state(self):
-        return json.loads((self.dir / "state.json").read_text())
-
-    def test_outside_the_gateway_it_does_nothing(self):
-        self.assertEqual(self._deployer(runner=None).tick(), [])
-        self.assertEqual(self.hermes.calls, [])
-
-    def test_a_policy_worker_that_had_to_be_ended_is_reported_once(self):
-        self.hermes.heads[MIRROR] = OLD
-        log = self.dir / "policy-worker.log"
-        self.deployer.tick()
-        self.assertEqual(self.posts, [])
-        first = "2026-11-26 17:00:00 UTC The policy worker was ended: its JavaScript did not answer for 15 seconds. It was running slackChunks in hermes22muse.\n"
-        log.write_text(first)
-        self.deployer.tick()
-        self.assertEqual(len(self.posts), 1)
-        self.assertIn("slackChunks in hermes22muse", self.posts[0])
-        self.assertIn(str(log), self.posts[0])
-        self.deployer.tick()
-        self._deployer().tick()
-        self.assertEqual(len(self.posts), 1)
-        # Only what is new is posted the next time.
-        log.write_text(first + "2026-11-26 18:00:00 UTC The policy worker exited with status -9.\n")
-        self.deployer.tick()
-        self.assertEqual(len(self.posts), 2)
-        self.assertIn("status -9", self.posts[1])
-        self.assertNotIn("slackChunks", self.posts[1])
-        self.assertEqual(self.state()["worker_log"], log.stat().st_size)
-
-    def test_moved_mirror_is_installed_pinned_then_the_gateway_restarts_once(self):
-        results = self.deployer.tick()
+    def test_installs_pinned_then_restarts_the_gateway_when_idle(self):
+        self.hermes.pids = [100, 100, 100, 200]
+        record = self.hermes.run(self.record("leon"), self.deploys)
         self.assertEqual(self.hermes.calls,
-                         [["plugins", "install", MIRROR, "--force", "--ref", NEW, "--yes-deps", "--enable"]])
-        self.assertEqual([r["error"] for r in results], [None])
-        self.assertEqual(self.restarts, [self.runner])
-        self.assertEqual(self.posts, [])
-        self.assertEqual(self.state()["attempts"], {})
-        # Now current, and the gateway is restarting: nothing more.
-        self.assertEqual(self.deployer.tick(), [])
-        self.runner._restart_requested = False
-        self.assertEqual(self.deployer.tick(), [])
-        self.assertEqual(len(self.hermes.calls), 1)
+                         [["plugins", "install", LEON, "--force", "--ref", NEW, "--yes-deps", "--enable"]])
+        self.assertEqual(self.hermes.restarted, [100])
+        self.assertEqual(record["status"], "done")
+        self.assertEqual(record["restart"], {"from": 100, "to": 200})
+        self.assertEqual(self.hermes.dashboard, [])
+        saved = self.deploys.get(record["id"])
+        self.assertEqual(saved["status"], "done")
+        self.assertTrue(saved["steps"][0]["ok"])
+        self.assertEqual(self.deploys.latest()["id"], record["id"])
 
-    def test_waits_for_the_gateway_to_go_quiet(self):
-        self.work = [2, 1, 0, 0, 0]
-        self.deployer.tick()
-        self.assertEqual(len(self.slept), 4)
-        self.assertEqual(len(self.hermes.calls), 1)
+    def test_a_restart_still_waiting_for_idle_ends_as_installed(self):
+        record = self.hermes.run(self.record("leon"), self.deploys, restart_wait=30)
+        self.assertEqual(record["status"], "installed")
+        self.assertIn("still finishing work", record["log"][-1])
 
-    def test_a_restart_already_underway_stops_the_wait(self):
-        self.work = [1]
+    def test_a_failed_install_keeps_the_old_code_and_restarts_for_the_rest(self):
+        self.hermes.fail["leon"] = 1
+        self.hermes.pids = [100, 200]
+        record = self.hermes.run(self.record("leon", "autodeploy"), self.deploys)
+        self.assertEqual([step["ok"] for step in record["steps"]], [False, True])
+        self.assertEqual(record["steps"][0]["error"], "hermes plugins install exited 1")
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(self.hermes.restarted, [100])
+        # autodeploy moved, so the dashboard runs the new API afterwards.
+        self.assertEqual(self.hermes.dashboard, [True])
 
-        def busy(_runner):
-            self.runner._draining = True
-            return 1
-
-        self.deployer.work = busy
-        self.assertEqual(self.deployer.tick(), [])
-        self.assertEqual(self.hermes.calls, [])
-
-    def test_deploys_the_newest_commit_when_the_mirror_moves_during_the_wait(self):
-        self.work = [1, 0, 0, 0]
-
-        def work(_runner):
-            self.hermes.heads[MIRROR] = NEWER
-            return self.work.pop(0) if len(self.work) > 1 else self.work[0]
-
-        self.deployer.work = work
-        self.deployer.tick()
-        self.assertEqual(self.hermes.calls[0][5], NEWER)
-
-    def test_failed_install_keeps_the_old_code_posts_and_retries_later(self):
-        self.hermes.fail["hermes22muse"] = (1, "Error: scan verdict dangerous")
-        results = self.deployer.tick()
-        self.assertIn("exited 1", results[0]["error"])
-        self.assertEqual(self.restarts, [])
-        self.assertEqual(len(self.posts), 1)
-        self.assertIn("scan verdict dangerous", self.posts[0])
-        self.assertEqual(self.state()["attempts"]["hermes22muse"]["count"], 1)
-        self.now += 60
-        self.assertEqual(self.deployer.tick(), [])
-        self.now += 5 * 60
-        del self.hermes.fail["hermes22muse"]
-        self.deployer.tick()
-        self.assertEqual(len(self.hermes.calls), 2)
-        self.assertEqual(len(self.restarts), 1)
+    def test_nothing_installed_means_no_restart(self):
+        self.hermes.fail["leon"] = 1
+        record = self.hermes.run(self.record("leon"), self.deploys)
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(self.hermes.restarted, [])
 
     def test_an_install_that_records_another_commit_counts_as_failed(self):
-        self.hermes.record_anyway = False
-        results = self.deployer.tick()
-        self.assertIn("recorded aaaaaaaaaaaa", results[0]["error"])
-        self.assertEqual(self.restarts, [])
+        self.hermes.install = lambda args: (self.hermes.calls.append(args), (0, "ok"))[1]
+        record = self.hermes.run(self.record("leon"), self.deploys)
+        self.assertIn("Hermes recorded aaaaaaaaaaaa", record["steps"][0]["error"])
+        self.assertEqual(record["status"], "failed")
 
-    def test_one_failure_still_restarts_for_the_plugin_that_moved(self):
-        self.hermes.heads["https://github.com/leonsiliconAI/slack22orca.git"] = NEW
-        self.hermes.fail["slack22orca"] = (2, "nope")
-        results = self.deployer.tick()
-        self.assertEqual([bool(r["error"]) for r in results], [False, True])
-        self.assertEqual(len(self.restarts), 1)
-        self.assertEqual(len(self.posts), 1)
-
-    def test_another_updater_holding_the_lock_is_retried_next_round_without_a_failure(self):
-        self.hermes.fail["hermes22muse"] = (
-            1, "Error: Plugin 'hermes22muse' is already being updated by another Hermes process; nothing was changed.")
-        self.assertEqual(self.deployer.tick(), [])
-        self.assertEqual(self.posts, [])
-        self.assertEqual(self.restarts, [])
-        self.assertFalse((self.dir / "state.json").exists())
-        del self.hermes.fail["hermes22muse"]
-        self.deployer.tick()
-        self.assertEqual(len(self.hermes.calls), 2)
-        self.assertEqual(len(self.restarts), 1)
-
-    def test_live_cron_runs_count_as_work(self):
-        jobs = [{"id": "a", "live_execution": {"pid": 1}}, {"id": "b", "live_execution": None}]
-        cron = type(sys)("cron")
-        cron_jobs = type(sys)("cron.jobs")
-        cron_jobs.list_jobs = lambda include_disabled=False: jobs if include_disabled else []
-        cron.jobs = cron_jobs
-        saved = {name: sys.modules.get(name) for name in ("cron", "cron.jobs")}
-        sys.modules.update({"cron": cron, "cron.jobs": cron_jobs})
-        try:
-            runner = SimpleNamespace(_active_work_count=lambda: 2)
-            self.assertEqual(plugin.active_work(runner), 3)
-            jobs[0]["live_execution"] = None
-            self.assertEqual(plugin.active_work(runner), 2)
-        finally:
-            for name, module in saved.items():
-                if module is None:
-                    sys.modules.pop(name, None)
-                else:
-                    sys.modules[name] = module
+    def test_ids_are_checked_before_they_name_a_file(self):
+        with self.assertRaises(ValueError):
+            self.deploys.get("../../etc/passwd")
 
 
-class NotifyTests(unittest.TestCase):
-    def test_without_a_channel_nothing_is_posted(self):
-        plugin.os.environ.pop(plugin.SLACK_CHANNEL_ENV, None)
-        plugin.notify("hello")  # would raise on a missing gateway config if it tried
+class TokenTests(unittest.TestCase):
+    def test_a_weak_token_is_refused(self):
+        self.assertIsNone(plugin.token_strength(secrets.token_urlsafe(32)))
+        self.assertIsNotNone(plugin.token_strength("short"))
+        self.assertIsNotNone(plugin.token_strength("a" * 64))
+
+    def test_the_provider_accepts_only_the_token(self):
+        class Base:
+            pass
+
+        auth = types.ModuleType("hermes_cli.dashboard_auth")
+        auth.DashboardAuthProvider = Base
+        auth.TokenPrincipal = lambda **kwargs: kwargs
+        token = secrets.token_urlsafe(32)
+        with patch.dict(sys.modules, {"hermes_cli": types.ModuleType("hermes_cli"), "hermes_cli.dashboard_auth": auth}):
+            provider = plugin.make_provider(token)
+        self.assertEqual(provider.verify_token(token=token)["provider"], plugin.PROVIDER_NAME)
+        self.assertIsNone(provider.verify_token(token=token + "x"))
+        self.assertIsNone(provider.verify_token(token=""))
+        self.assertFalse(provider.supports_session)
+
+    def test_without_a_token_nothing_is_registered(self):
+        ctx = types.SimpleNamespace(register_dashboard_auth_provider=lambda provider: self.fail("registered"))
+        with patch.dict("os.environ", {plugin.TOKEN_ENV: ""}):
+            plugin.register_token(ctx)
+        with patch.dict("os.environ", {plugin.TOKEN_ENV: "too-short"}):
+            plugin.register_token(ctx)
+
+
+class ReporterTests(unittest.TestCase):
+    def test_a_policy_worker_that_had_to_be_ended_is_reported_once(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        log = directory / "policy-worker.log"
+        posts = []
+        reporter = plugin.Reporter(directory / "state.json", post=posts.append, worker_log=lambda: log)
+        reporter.report()
+        self.assertEqual(posts, [])
+        first = "2026-11-26 17:00:00 UTC The policy worker was ended: it was running slackChunks in hermes22muse.\n"
+        log.write_text(first)
+        reporter.report()
+        reporter.report()
+        self.assertEqual(len(posts), 1)
+        self.assertIn("slackChunks in hermes22muse", posts[0])
+        log.write_text(first + "2026-11-26 18:00:00 UTC The policy worker exited with status -9.\n")
+        reporter.report()
+        self.assertEqual(len(posts), 2)
+        self.assertNotIn("slackChunks", posts[1])
+        self.assertEqual(json.loads((directory / "state.json").read_text())["worker_log"], log.stat().st_size)
+
+
+try:
+    import fastapi  # noqa: F401
+    from fastapi.testclient import TestClient
+except ImportError:  # the API's tests need FastAPI, which Hermes ships
+    TestClient = None
+
+
+@unittest.skipIf(TestClient is None, "needs fastapi and httpx")
+class ApiTests(unittest.TestCase):
+    def setUp(self):
+        from fastapi import FastAPI
+
+        self.dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        api_spec = importlib.util.spec_from_file_location("autodeploy_api_test", ROOT / "dashboard" / "api.py")
+        self.api = importlib.util.module_from_spec(api_spec)
+        api_spec.loader.exec_module(self.api)
+        self.started = []
+        fake = types.SimpleNamespace(
+            PROVIDER_NAME=plugin.PROVIDER_NAME, _policy=plugin._policy,
+            read_installs=lambda: [install()], Deploys=lambda: plugin.Deploys(self.dir),
+            start_worker=lambda record, pid: self.started.append(record["id"]))
+        self.enterContext(patch.object(self.api, "_plugin", lambda: fake))
+        app = FastAPI()
+        self.provider = plugin.PROVIDER_NAME
+
+        @app.middleware("http")
+        async def token(request, call_next):
+            # What Hermes's token-auth seam attaches for a recognised bearer.
+            if request.headers.get("authorization") == "Bearer ok":
+                request.state.token_principal = types.SimpleNamespace(provider=self.provider)
+            return await call_next(request)
+
+        app.include_router(self.api.router, prefix="/api/plugins/autodeploy")
+        self.client = TestClient(app)
+
+    def post(self, body, token="ok"):
+        return self.client.post("/api/plugins/autodeploy/deploy", json=body, headers={"Authorization": f"Bearer {token}"})
+
+    def test_ci_starts_a_deploy_and_reads_it_back(self):
+        response = self.post({"plugins": [want()], "source": "c" * 40})
+        self.assertEqual(response.status_code, 200, response.text)
+        record = response.json()
+        self.assertEqual(record["status"], "queued")
+        self.assertEqual(self.started, [record["id"]])
+        status = self.client.get(f"/api/plugins/autodeploy/deploy?id={record['id']}",
+                                 headers={"Authorization": "Bearer ok"})
+        self.assertEqual(status.json()["deploys"][0]["to"], NEW)
+
+    def test_a_deploy_with_nothing_to_move_is_done_at_once(self):
+        record = self.post({"plugins": [want(commit=OLD)]}).json()
+        self.assertEqual(record["status"], "done")
+        self.assertEqual(self.started, [])
+
+    def test_a_bad_request_is_refused_and_starts_nothing(self):
+        response = self.post({"plugins": [want("unknown")]})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("isn't installed", json.dumps(response.json()))
+        self.assertEqual(self.started, [])
+
+    def test_only_cis_token_gets_in(self):
+        self.assertEqual(self.post({"plugins": [want()]}, token="nope").status_code, 401)
+        self.assertEqual(self.client.get("/api/plugins/autodeploy/deploy").status_code, 401)
+        self.assertEqual(self.started, [])
 
 
 if __name__ == "__main__":
